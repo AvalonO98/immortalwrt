@@ -1,0 +1,191 @@
+name: Build OpenWrt for JDCloud AX1800 (with iStore)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: '源码仓库'
+        required: false
+        default: 'https://github.com/immortalwrt/immortalwrt.git'
+      branch:
+        description: '源码分支'
+        required: false
+        default: 'openwrt-23.05'
+
+env:
+  TARGET: qualcommax
+  SUBTARGET: ipq60xx
+  DEVICE_VENDOR: jdcloud
+  DEVICE_MODEL: re-cp-03
+
+jobs:
+  build:
+    name: 编译固件
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint \
+          binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler \
+          ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged \
+          help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
+          libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev lzma-dev lzma lz4 m4 make \
+          musl-tools ncurses-dev ninja-build pkg-config python3 python3-dev python3-pip \
+          python3-ply python3-docutils python3-pyelftools python3-setuptools qemu-utils \
+          re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
+          unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      - name: 配置 Git
+        run: |
+          git config --global user.name "builder"
+          git config --global user.email "builder@localhost"
+
+      - name: 配置 CCache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: openwrt-jdcloud-${{ github.sha }}
+          restore-keys: |
+            openwrt-jdcloud-
+
+      - name: 克隆 ImmortalWrt 源码
+        run: |
+          git clone --depth 1 \
+            -b ${{ github.event.inputs.branch || 'openwrt-23.05' }} \
+            ${{ github.event.inputs.repository || 'https://github.com/immortalwrt/immortalwrt.git' }} \
+            openwrt
+
+      - name: 更新 Feeds
+        working-directory: ./openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 搜索目标设备名
+        working-directory: ./openwrt
+        run: |
+          echo "=== 可用的 JDCloud 设备 ==="
+          grep -r "jdcloud" target/linux/*/image/*.mk 2>/dev/null | head -20 || echo "未在内核镜像中找到"
+          grep -r "jdcloud" package/boot/uboot-envtools/files 2>/dev/null || true
+          # 在 targets 目录中搜索
+          DEVICE_LIST=$(grep -rh "Device/jdcloud" target/linux/*/image/*.mk 2>/dev/null | sed 's/define Device\/\(.*\)/\1/')
+          if [ -n "$DEVICE_LIST" ]; then
+            echo "找到设备: $DEVICE_LIST"
+          else
+            echo "未直接找到 jdcloud 设备定义，将使用 jdcloud_re-cp-03"
+          fi
+
+      - name: 生成 .config 配置文件
+        working-directory: ./openwrt
+        run: |
+          # 基础目标平台
+          echo "CONFIG_TARGET_${TARGET}=y" >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${DEVICE_VENDOR}_${DEVICE_MODEL}=y" >> .config
+
+          # ===== LUCI / Web 管理 =====
+          echo "CONFIG_PACKAGE_luci=y" >> .config
+          echo "CONFIG_PACKAGE_luci-base=y" >> .config
+          echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> .config
+          echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
+
+          # ===== iStore 应用商店 =====
+          echo "CONFIG_PACKAGE_luci-app-store=y" >> .config
+          echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> .config
+          echo "CONFIG_PACKAGE_luci-lib-xterm=y" >> .config
+
+          # ===== 网络加速 =====
+          echo "CONFIG_PACKAGE_luci-app-turboacc=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_SHORTCUT_FE=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_OFFLOADING=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-turboacc_INCLUDE_BBR_CCA=y" >> .config
+
+          # ===== 科学上网（可选，注释掉取消） =====
+          # echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          # echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
+          # echo "CONFIG_PACKAGE_luci-app-ssr-plus=y" >> .config
+
+          # ===== 系统工具 =====
+          echo "CONFIG_PACKAGE_curl=y" >> .config
+          echo "CONFIG_PACKAGE_wget=y" >> .config
+          echo "CONFIG_PACKAGE_nano=y" >> .config
+          echo "CONFIG_PACKAGE_htop=y" >> .config
+          echo "CONFIG_PACKAGE_tcpdump=y" >> .config
+          echo "CONFIG_PACKAGE_openssh-sftp-server=y" >> .config
+          echo "CONFIG_PACKAGE_autocore=y" >> .config
+          echo "CONFIG_PACKAGE_automount=y" >> .config
+
+          # ===== 文件系统 / 存储 =====
+          echo "CONFIG_PACKAGE_kmod-usb-storage=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-usb3=y" >> .config
+          echo "CONFIG_PACKAGE_blkid=y" >> .config
+          echo "CONFIG_PACKAGE_block-mount=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-samba4=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-aria2=y" >> .config
+
+          # ===== 多语言 =====
+          echo "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y" >> .config
+
+          # ===== 编译优化 =====
+          echo "CONFIG_CCACHE=y" >> .config
+          echo "CONFIG_BUILD_LOG=y" >> .config
+
+          # 生成完整配置
+          make defconfig
+
+      - name: 显示最终配置
+        working-directory: ./openwrt
+        run: |
+          ./scripts/diffconfig.sh
+          echo ""
+          echo "=== 编译固件大小 ==="
+          grep "CONFIG_TARGET_KERNEL_PARTSIZE\|CONFIG_TARGET_ROOTFS_PARTSIZE" .config
+
+      - name: 下载软件包
+        working-directory: ./openwrt
+        run: |
+          make download -j$(nproc) V=s 2>&1 | grep -E "ERROR|warn|fail" || true
+          # 检查是否有下载失败的文件
+          find dl -size -1024c -exec ls -l {} \;
+
+      - name: 编译固件
+        working-directory: ./openwrt
+        run: |
+          # 先试并行编译，失败则单线程重试
+          make -j$(($(nproc) + 1)) V=s || make -j1 V=s
+
+      - name: 整理固件
+        working-directory: ./openwrt
+        run: |
+          FIRMWARE_DIR="bin/targets/${TARGET}/${SUBTARGET}"
+          echo "=== 编译产物 ==="
+          ls -lh ${FIRMWARE_DIR}/ 2>/dev/null || echo "目录不存在"
+          echo ""
+          echo "=== 固件文件 ==="
+          find ${FIRMWARE_DIR} -name "*.bin" -o -name "*.img" -o -name "*.gz" -o -name "*.zip" 2>/dev/null | head -20
+          echo ""
+          echo "=== 校验和 ==="
+          cat ${FIRMWARE_DIR}/sha256sums 2>/dev/null || true
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-jdcloud-ax1800-${{ github.run_number }}
+          path: |
+            openwrt/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.bin
+            openwrt/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/*.img
+            openwrt/bin/targets/${{ env.TARGET }}/${{ env.SUBTARGET }}/sha256sums
+          retention-days: 30
+
+      - name: 清理
+        if: always()
+        working-directory: ./openwrt
+        run: |
+          # 保留编译产物，清理临时文件
+          du -sh . 2>/dev/null
